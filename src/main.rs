@@ -38,14 +38,7 @@ fn main() -> Result<()> {
     if ip_split.len() >= 2 {
         port = ip_split[1].to_string();
     }
-    let resolver = Resolver::new(ResolverConfig::default(), ResolverOpts::default());
-    let resolver = match resolver {
-        Ok(r) => r,
-        Err(e) => {
-            log::error!("error: {}", e.to_string());
-            exit(1);
-        }
-    };
+    let resolver = Resolver::new(ResolverConfig::cloudflare_tls(), ResolverOpts::default()).unwrap();
     let mut ip = ip_split[0].to_owned();
     if let Some((srv_ip, srv_port)) = srv_lookup(&ip) {
         log::info!("got SRV record for {}:{}, using it instead", srv_ip, srv_port);
@@ -249,13 +242,7 @@ fn read_string(reader: &mut dyn std::io::Read) -> Result<String> {
 
 
 fn srv_lookup(domain: &str) -> Option<(String, u16)> {
-    let resolver = Resolver::new(ResolverConfig::default(), ResolverOpts::default());
-    let resolver = match resolver {
-        Ok(r) => r,
-        Err(_) => {
-            return None;
-        }
-    };
+    let resolver = Resolver::new(ResolverConfig::cloudflare_tls(), ResolverOpts::default()).unwrap();
     let srv = resolver.srv_lookup(format!("_minecraft._tcp.{}", domain.to_string()));
     let srv = match srv {
         Ok(r) => r,
