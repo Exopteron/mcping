@@ -14,11 +14,34 @@ use trust_dns_resolver::Resolver;
 struct Options {
     #[structopt(long)]
     pvn: Option<i32>,
+    #[structopt(long)]
+    modlist: bool,
     #[structopt(short, long)]
     verbose: bool,
     #[structopt(long = "ping")]
     only_ping: bool,
     addr: String,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct Mod {
+    modid: String,
+    version: String,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct ModInfo {
+    r#type: String,
+    modList: Vec<Mod>
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct Players {
+    max: usize,
+    online: usize,
+    sample: Vec<Player>
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct Player {
+    id: String,
+    name: String,
 }
 #[derive(Debug)]
 pub enum PingError {
@@ -192,6 +215,36 @@ fn ping(options: &Options, pvn: i32, port: &str, addr: &str) -> Result<u128> {
             log::info!("server description:\n{:?}", deserialized["description"]);
         }
     }
+    if !deserialized["modinfo"].is_null() {
+        loop {
+            let modinfo: ModInfo = match serde_json::from_str(&deserialized["modinfo"].to_string()) {
+                Ok(m) => m,
+                Err(_) => {
+                    break;
+                }
+            };
+            if modinfo.r#type == "FML" && options.modlist || options.verbose {
+                log::info!("FML mod info:");
+                for i in 0..modinfo.modList.len() {
+                    log::info!("mod #{}", i + 1);
+                    println!("   --- id: {}", modinfo.modList[i].modid);   
+                    println!("   --- version: {}", modinfo.modList[i].version);   
+                }
+            } else if modinfo.r#type == "FML" {
+                let len = modinfo.modList.len();
+                match len {
+                    1 => {
+                        log::info!("server is an FML compatible server with {} mod.", len);
+                    }
+                    _ => {
+                        log::info!("server is an FML compatible server with {} mods.", len);
+                    }
+                }
+            }
+            break;
+        }
+    }
+    //log::info!("poo: {}", deserialized["ashh1"].is_null());
     log::info!(
         "server version:\n   --- {}\n   --- protocol version {}",
         deserialized["version"]["name"],
@@ -202,6 +255,21 @@ fn ping(options: &Options, pvn: i32, port: &str, addr: &str) -> Result<u128> {
         deserialized["players"]["online"],
         deserialized["players"]["max"]
     );
+    if !deserialized["players"]["sample"].is_null() {
+        loop {
+            let sample: Players = match serde_json::from_str(&deserialized["players"].to_string()) {
+                Ok(m) => m,
+                Err(_) => {
+                    break;
+                }
+            };
+            log::info!("sample:");
+            for player in sample.sample {
+                println!("   --- {}", player.name);
+            }
+            break;
+        }
+    }
     }
     let now = Instant::now();
     let response = PacketUtils::read_packet(&mut stream).or_else(|_| Err(PingError::ReadError))?;
