@@ -9,6 +9,8 @@ use std::time::Instant;
 use structopt::StructOpt;
 use trust_dns_resolver::config::*;
 use trust_dns_resolver::Resolver;
+mod query_netutil;
+const DEFAULT_PVN: i32 = -1;
 #[derive(Debug, StructOpt)]
 #[structopt(name = "mcping")]
 struct Options {
@@ -18,6 +20,8 @@ struct Options {
     modlist: bool,
     #[structopt(short, long)]
     verbose: bool,
+    #[structopt(long)]
+    query: bool,
     #[structopt(long = "ping")]
     only_ping: bool,
     addr: String,
@@ -51,6 +55,10 @@ pub enum PingError {
     WriteError,
     ReadError,
     GenericPingError,
+    CantBind,
+    WrongPacket,
+    NoAddress,
+    NumFromStrErr,
 }
 pub type Result<T> = std::result::Result<T, PingError>;
 fn main() -> Result<()> {
@@ -82,14 +90,27 @@ fn main() -> Result<()> {
             addresses.push(address);
         }
     }
+    if options.query {
+        let address = addresses.iter().next().ok_or(PingError::NoAddress)?;
+        log::info!("attempting query to {}:{}...", address, port);
+        match query_ping(&options, &port, &address.to_string()) {
+            Ok(_) => {
+
+            }
+            Err(_) => {
+
+            }
+        }
+        return Ok(());
+    }
     let addr_to_use;
     let len = addresses.len();
-    let mut pvn = -1;
+    let mut pvn = DEFAULT_PVN;
     if let Some(x) = options.pvn {
         pvn = x;
         log::info!("pinging with protocol version {}", pvn);
     } else {
-        log::info!("no protocol version provided, using default {}", pvn);
+        log::info!("no protocol version provided, using default ({})", pvn);
     }
     if len > 1 {
         for i in 0..len {
@@ -98,8 +119,8 @@ fn main() -> Result<()> {
         let mut num: usize;
         log::info!("multiple addresses found. which do we use? (0 for all)");
         loop {
-            let line = get_line().or_else(|_| Err(PingError::StdinReadError))?;
             loop {
+                let line = get_line().or_else(|_| Err(PingError::StdinReadError))?;
                 let x = usize::from_str_radix(&line, 10);
                 if x.is_err() {
                     log::warn!("not a valid number.");
@@ -146,7 +167,148 @@ fn main() -> Result<()> {
     }
     let addr = format!("{}:{}", addr_to_use, port);
     log::info!("attempting to ping {}...", addr);
-    ping(&options, pvn, &port, &addr)?;
+    match ping(&options, pvn, &port, &addr) {
+        Ok(_) => {
+
+        }
+        Err(_) => {
+        
+        }
+    }
+    log::info!("attempting query to {}...", addr);
+    match query_ping(&options, &port, &addr) {
+        Ok(_) => {
+
+        }
+        Err(_) => {
+        
+        }
+    }
+    Ok(())
+}
+fn query_ping(options: &Options, port: &str, addr: &str) -> Result<()> {
+    use std::net::UdpSocket;
+    use rand::RngCore;
+    let mut socket = UdpSocket::bind("0.0.0.0:62034");
+    let mut set = false;
+    if socket.is_err() {
+        for i in (0..65535).rev() {
+            let x = UdpSocket::bind(format!("0.0.0.0:{}", i));
+            if x.is_ok() {
+                socket = x;
+                set = true;
+                break;
+            }
+        }
+    } else {
+        set = true;
+    }
+    if !set {
+        return Err(PingError::CantBind);
+    }
+    let socket = socket.unwrap();
+    let x = format!("{}:{}", addr, port);
+
+    match socket.connect(x) {
+        Ok(_) => {
+
+        }
+        Err(_) => {
+            log::info!("failed to connect. server probably doesn't support query/wrong port.");
+            return Err(PingError::ConnectError);
+        }
+    }
+    socket.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+    let mut session_id = [0; 4];
+    rand::thread_rng().fill_bytes(&mut session_id);
+    let session_id = i32::from_be_bytes(session_id) & 0x0F0F0F0F;
+    let packet = query_netutil::PacketBuilder::new();
+    let packet = packet.build(09, session_id);
+    socket.send(&packet).or(Err(PingError::WriteError))?;
+    let mut vec = vec![0; 64];
+    let amt = socket.recv(&mut vec);
+    let amt = match amt {
+        Ok(a) => a,
+        Err(e) => {
+            match e.kind() {
+                std::io::ErrorKind::WouldBlock {} => {
+                    log::info!("no response after 5 seconds. server probably doesn't support query.");
+                    return Err(PingError::ReadError);
+                }
+                std::io::ErrorKind::TimedOut {} => {
+                    log::info!("no response after 5 seconds. server probably doesn't support query.");
+                    return Err(PingError::ReadError);
+                }
+                _ => {
+                    return Err(PingError::ReadError);
+                }
+            }
+            
+        }
+    };
+    let vec = vec.drain(..amt);
+    let mut vec = std::io::Cursor::new(vec);
+    let p_type = query_netutil::PacketUtils::read_byte(&mut vec).ok_or(PingError::ReadError)?;
+    if p_type != 0x09 {
+        return Err(PingError::WrongPacket);
+    }
+    let recv_s_id = query_netutil::PacketUtils::read_int32(&mut vec).ok_or(PingError::ReadError)?;
+    if recv_s_id != session_id {
+        return Err(PingError::WrongPacket);
+    }
+    let challenge_token = query_netutil::PacketUtils::read_string(&mut vec).ok_or(PingError::ReadError)?;
+    let challenge_token = i32::from_str_radix(&challenge_token, 10).or(Err(PingError::NumFromStrErr))?;
+    let mut packet = query_netutil::PacketBuilder::new();
+    packet.insert_int(challenge_token);
+    packet.insert_bytearray(vec![0; 4]);
+    let packet = packet.build(0x00, session_id);
+    socket.send(&packet).or(Err(PingError::WriteError))?;
+    let mut vec = vec![0; 2048];
+    let amt = socket.recv(&mut vec).or(Err(PingError::ReadError))?;
+    let vec = vec.drain(..amt);
+    let mut vec = std::io::Cursor::new(vec);
+    let p_type = query_netutil::PacketUtils::read_byte(&mut vec).ok_or(PingError::ReadError)?;
+    if p_type != 0x00 {
+        return Err(PingError::WrongPacket);
+    }
+    let recv_s_id = query_netutil::PacketUtils::read_int32(&mut vec).ok_or(PingError::ReadError)?;
+    if recv_s_id != session_id {
+        return Err(PingError::WrongPacket);
+    }
+    let mut x = [0; 11];
+    vec.read_exact(&mut x).or(Err(PingError::ReadError))?;
+    drop(x);
+    use std::collections::HashMap;
+    let mut hashmap: HashMap<String, String> = HashMap::new();
+    loop {
+        let key = query_netutil::PacketUtils::read_string(&mut vec).ok_or(PingError::ReadError)?;
+        if key.len() == 0 {
+            break;
+        }
+        let value = query_netutil::PacketUtils::read_string(&mut vec).ok_or(PingError::ReadError)?;
+        hashmap.insert(key, value);
+    }
+    log::info!("query results:");
+    for (k, v) in hashmap {
+        println!("- {}: {}", k, v);
+    }
+    let mut x = [0; 10];
+    vec.read_exact(&mut x).or(Err(PingError::ReadError))?;
+    drop(x);
+    let mut players = vec![];
+    loop {
+        let player = query_netutil::PacketUtils::read_string(&mut vec).ok_or(PingError::ReadError)?;
+        if player.len() < 1 {
+            break;
+        }
+        players.push(player);
+    }
+    if players.len() > 0 {
+        log::info!("online players:");
+        for player in players {
+            println!("- {}", player);
+        }
+    }
     Ok(())
 }
 fn ping(options: &Options, pvn: i32, port: &str, addr: &str) -> Result<u128> {
