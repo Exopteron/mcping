@@ -499,19 +499,85 @@ fn srv_lookup(domain: &str) -> Option<(String, u16)> {
 
 fn legacy_ping(addr: &str) -> Result<()> {
     let mut stream = TcpStream::connect(addr).or_else(|_| Err(PingError::ConnectError))?;
-    stream.write(&[0xFE, 0x01]).or_else(|_| Err(PingError::WriteError))?;
+    stream.write(&[0xFE, 0x01, 0xFA]).or_else(|_| Err(PingError::WriteError))?;
     let mut buf = vec![];
     stream.read_to_end(&mut buf).unwrap();
-    let buf = &buf[2..];
+    let buf = &buf[3..];
     let mut newbuf = vec![];
-    let mut flag = false;
-    for i in 0..buf.len() - 1 {
+    let mut flag = true;
+    for i in 0..buf.len() {
         if flag == false {
             newbuf.push(buf[i]);
-        } else {
-            flag ^= true;
         }
+        flag ^= true;
     }
-    println!("{:?}", String::from_utf8_lossy(&newbuf));
+    let mut string = vec![];
+    for i in 0..6 {
+        string.push(buf[i]);
+    }
+    let mut values = vec![];
+    let mut chars: Vec<char> = String::from_utf8_lossy(&newbuf).to_string().chars().collect();
+    if string == [0, 167, 0, 49, 0, 0] {
+        chars.remove(0);
+        chars.remove(0);
+        chars.remove(0);
+        loop {
+            let mut string = String::new();
+            loop {
+                let character = chars.remove(0);
+                if character as u8 != 0x00 {
+                    string.push(character);
+                } else {
+                    values.push(string);
+                    break;
+                }
+                if chars.len() == 0 {
+                    values.push(string);
+                    break;
+                }
+            }
+            if chars.len() == 0 {
+                break;
+            }        
+        }
+        log::info!("server description:\n{}", values[2]);
+        log::info!(
+            "server version:\n   --- {}\n   --- protocol version {}",
+            values[1],
+            values[0]
+        );
+        log::info!(
+            "players:\n   --- {}/{}",
+            values[3],
+            values[4]
+        );
+    } else {
+        loop {
+            let mut string = String::new();
+            loop {
+                let character = chars.remove(0);
+                if character as u8 != 253 {
+                    string.push(character);
+                } else {
+                    values.push(string);
+                    break;
+                }
+                if chars.len() == 0 {
+                    values.push(string);
+                    break;
+                }
+            }
+            if chars.len() == 0 {
+                break;
+            }        
+        }
+        log::info!("server description:\n{}", values[0]);
+        log::info!("server version cannot be determined in this version of the protocol. probably older than release 1.4");
+        log::info!(
+            "players:\n   --- {}/{}",
+            values[1],
+            values[2]
+        );
+    }
     Ok(())
 }
