@@ -92,8 +92,9 @@ fn main() -> Result<()> {
     }
     if options.query {
         let address = addresses.iter().next().ok_or(PingError::NoAddress)?;
-        log::info!("attempting query to {}:{}...", address, port);
-        match query_ping(&options, &port, &address.to_string()) {
+        let addr = format!("{}:{}", address.to_string(), port);
+        log::info!("attempting query to {}", addr);
+        match query_ping(&options, &addr) {
             Ok(_) => {
 
             }
@@ -176,7 +177,7 @@ fn main() -> Result<()> {
         }
     }
     log::info!("attempting query to {}...", addr);
-    match query_ping(&options, &port, &addr) {
+    match query_ping(&options, &addr) {
         Ok(_) => {
 
         }
@@ -186,7 +187,7 @@ fn main() -> Result<()> {
     }
     Ok(())
 }
-fn query_ping(options: &Options, port: &str, addr: &str) -> Result<()> {
+fn query_ping(options: &Options, addr: &str) -> Result<()> {
     use std::net::UdpSocket;
     use rand::RngCore;
     let mut socket = UdpSocket::bind("0.0.0.0:62034");
@@ -207,9 +208,8 @@ fn query_ping(options: &Options, port: &str, addr: &str) -> Result<()> {
         return Err(PingError::CantBind);
     }
     let socket = socket.unwrap();
-    let x = format!("{}:{}", addr, port);
 
-    match socket.connect(x) {
+    match socket.connect(addr) {
         Ok(_) => {
 
         }
