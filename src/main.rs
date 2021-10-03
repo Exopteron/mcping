@@ -59,6 +59,8 @@ pub enum PingError {
     WrongPacket,
     NoAddress,
     NumFromStrErr,
+    TimeoutError,
+    FaviconError,
 }
 pub type Result<T> = std::result::Result<T, PingError>;
 fn main() -> Result<()> {
@@ -172,8 +174,15 @@ fn main() -> Result<()> {
         Ok(_) => {
 
         }
-        Err(_) => {
-        
+        Err(e) => {
+            match e {
+                PingError::TimeoutError => {
+                    log::warn!("ping timed out.");
+                }
+                _ => {
+
+                }
+            }
         }
     }
     log::info!("attempting query to {}...", addr);
@@ -318,7 +327,9 @@ fn ping(options: &Options, pvn: i32, port: &str, addr: &str) -> Result<u128> {
     builder.insert_unsigned_short(u16::from_str_radix(&port, 10).or_else(|_| Err(PingError::ParseIntError))?);
     builder.insert_varint(1);
     let packet = builder.build(0x00);
-    let mut stream = TcpStream::connect(&addr).or_else(|_| Err(PingError::ConnectError))?;
+    let mut stream = TcpStream::connect_timeout(&addr.parse().unwrap(), std::time::Duration::from_secs(5)).or_else(|_| Err(PingError::TimeoutError))?;
+    stream.set_write_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
     stream
         .write(&packet)
         .or_else(|_| Err(PingError::WriteError))?;
@@ -412,11 +423,17 @@ fn ping(options: &Options, pvn: i32, port: &str, addr: &str) -> Result<u128> {
         deserialized["version"]["name"],
         deserialized["version"]["protocol"]
     );
-    log::info!(
-        "players:\n   --- {}/{}",
-        deserialized["players"]["online"],
-        deserialized["players"]["max"]
-    );
+    if !deserialized["players"].is_null() {
+        log::info!(
+            "players:\n   --- {}/{}",
+            deserialized["players"]["online"],
+            deserialized["players"]["max"]
+        );
+    } else {
+        log::info!(
+            "server is not announcing player count."
+        );
+    }
     if !deserialized["players"]["sample"].is_null() {
         loop {
             let sample: Players = match serde_json::from_str(&deserialized["players"].to_string()) {
@@ -433,6 +450,30 @@ fn ping(options: &Options, pvn: i32, port: &str, addr: &str) -> Result<u128> {
         }
     }
     }
+    use viuer::*;
+    if !deserialized["favicon"].is_null() {
+        let favicon = deserialized["favicon"].to_string();
+        let mut favicon = rem_first_and_last(&favicon).to_string();
+        if favicon.starts_with("data:image/png;base64,") {
+            favicon.drain(.."data:image/png;base64,".len());
+            let favicon = base64::decode(favicon);
+            if favicon.is_ok() {
+                let favicon = favicon.unwrap();
+                let conf = Config {
+                    width: Some(32),
+                    height: Some(16),
+                    x: 0,
+                    y: 64,
+                    ..Default::default()
+                };
+                let img = image::load_from_memory(&favicon).or_else(|_| Err(PingError::FaviconError))?;
+                log::info!("favicon:\n\n\n");
+                print(&img, &conf).or_else(|_| Err(PingError::ReadError))?;
+                println!("\n\n\n");
+            }
+        }
+    }
+    //log::info!("{}", deserialized["favicon"].to_string());
     let now = Instant::now();
     let response = PacketUtils::read_packet(&mut stream).or_else(|_| Err(PingError::ReadError))?;
     if response.id != 0x01 {
@@ -580,4 +621,10 @@ fn legacy_ping(addr: &str) -> Result<()> {
         );
     }
     Ok(())
+}
+fn rem_first_and_last(value: &str) -> &str {
+    let mut chars = value.chars();
+    chars.next();
+    chars.next_back();
+    chars.as_str()
 }
