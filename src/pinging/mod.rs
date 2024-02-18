@@ -1,5 +1,6 @@
 pub mod mc_legacy;
 pub mod mc_modern;
+pub mod mc_query;
 
 use std::net::SocketAddr;
 
