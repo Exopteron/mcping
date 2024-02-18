@@ -1,630 +1,199 @@
-use colored_json::prelude::*;
+use std::{
+    borrow::Cow,
+    process::ExitCode,
+    time::Duration,
+};
+
+use clap::Parser;
 use env_logger::Builder;
 use log::LevelFilter;
-use rust_minecraft_networking::{PacketBuilder, PacketUtils};
-use std::io::{Read, Write};
-use std::net::TcpStream;
-use std::process::exit;
-use std::time::Instant;
-use structopt::StructOpt;
-use trust_dns_resolver::config::*;
-use trust_dns_resolver::Resolver;
-mod query_netutil;
-const DEFAULT_PVN: i32 = -1;
-#[derive(Debug, StructOpt)]
-#[structopt(name = "mcping")]
+
+use crate::{
+    input::selector::{self, Selected},
+    pinging::{mc_legacy::LegacyPinger, mc_modern::ModernPinger, Pinger},
+};
+
+mod input;
+mod pinging;
+mod resolution;
+
+#[derive(Parser, Debug)]
+#[clap(name = "mcping")]
 struct Options {
-    #[structopt(long)]
-    pvn: Option<i32>,
-    #[structopt(long)]
-    modlist: bool,
-    #[structopt(short, long)]
+    #[arg(short, long)]
     verbose: bool,
-    #[structopt(long)]
+    #[arg(long)]
     query: bool,
-    #[structopt(long = "ping")]
+    #[arg(long = "ping")]
     only_ping: bool,
     addr: String,
 }
-#[derive(serde::Serialize, serde::Deserialize)]
-pub struct Mod {
-    modid: String,
-    version: String,
-}
-#[derive(serde::Serialize, serde::Deserialize)]
-pub struct ModInfo {
-    r#type: String,
-    modList: Vec<Mod>
-}
-#[derive(serde::Serialize, serde::Deserialize)]
-pub struct Players {
-    max: usize,
-    online: usize,
-    sample: Vec<Player>
-}
-#[derive(serde::Serialize, serde::Deserialize)]
-pub struct Player {
-    id: String,
-    name: String,
-}
-#[derive(Debug)]
-pub enum PingError {
-    StdinReadError,
-    ParseIntError,
-    ConnectError,
-    WriteError,
-    ReadError,
-    GenericPingError,
-    CantBind,
-    WrongPacket,
-    NoAddress,
-    NumFromStrErr,
-    TimeoutError,
-    FaviconError,
-}
-pub type Result<T> = std::result::Result<T, PingError>;
-fn main() -> Result<()> {
-    init_logger();
-    let options = Options::from_args();
-    let ip_split = options.addr.split(":").collect::<Vec<&str>>();
-    let mut port = "25565".to_owned();
-    if ip_split.len() >= 2 {
-        port = ip_split[1].to_string();
-    }
-    let resolver = Resolver::new(ResolverConfig::cloudflare_tls(), ResolverOpts::default()).unwrap();
-    let mut ip = ip_split[0].to_owned();
-    if let Some((srv_ip, srv_port)) = srv_lookup(&ip) {
-        log::info!("got SRV record for {}:{}, using it instead", srv_ip, srv_port);
-        ip = srv_ip;
-        port = srv_port.to_string();
-    }
-    let response = resolver.lookup_ip(ip);
-    let response = match response {
-        Ok(r) => r,
-        Err(e) => {
-            log::error!("error: {}", e.to_string());
-            exit(1);
-        }
-    };
-    let mut addresses = vec![];
-    for address in response.iter() {
-        if address.is_ipv4() {
-            addresses.push(address);
-        }
-    }
-    if options.query {
-        let address = addresses.iter().next().ok_or(PingError::NoAddress)?;
-        let addr = format!("{}:{}", address.to_string(), port);
-        log::info!("attempting query to {}", addr);
-        match query_ping(&options, &addr) {
-            Ok(_) => {
 
-            }
-            Err(_) => {
+fn main() -> ExitCode {
+    let options = Options::parse();
+    init_logger(options.verbose);
 
-            }
+    let name = {
+        let opts = options.addr.split(':').collect::<Vec<_>>();
+        if opts.len() > 2 {
+            log::error!("Invalid address provided.");
+            return ExitCode::FAILURE;
         }
-        return Ok(());
-    }
-    let addr_to_use;
-    let len = addresses.len();
-    let mut pvn = DEFAULT_PVN;
-    if let Some(x) = options.pvn {
-        pvn = x;
-        log::info!("pinging with protocol version {}", pvn);
-    } else {
-        log::info!("no protocol version provided, using default ({})", pvn);
-    }
-    if len > 1 {
-        for i in 0..len {
-            println!("{}: {}", i + 1, addresses[i]);
-        }
-        let mut num: usize;
-        log::info!("multiple addresses found. which do we use? (0 for all)");
-        loop {
-            loop {
-                let line = get_line().or_else(|_| Err(PingError::StdinReadError))?;
-                let x = usize::from_str_radix(&line, 10);
-                if x.is_err() {
-                    log::warn!("not a valid number.");
-                } else {
-                    num = x.unwrap();
-                    break;
-                }
-            }
-            if num == 0 {
-                log::info!("testing all addresses...");
-                use std::collections::HashMap;
-                let mut hashmap: HashMap<u128, String> = HashMap::new();
-                for addr in &addresses {
-                    let addr = format!("{}:{}", addr, port);
-                    match ping(&options, pvn, &port, &addr) {
-                        Ok(x) => {
-                            hashmap.insert(x, addr);
-                        }
-                        Err(_) => {
-                            log::error!("an error occured pinging {}.", addr);
-                        }
-                    }
-                }
-                let mut bestping = u128::MAX;
-                let mut bestaddr = "".to_owned();
-                for (ping, addr) in hashmap {
-                    if ping < bestping {
-                        bestaddr = addr;
-                        bestping = ping;
-                    }
-                }
-                log::info!("best ping is {} with a time of {}ms", bestaddr, bestping);
-                exit(0);
-            }
-            if num as usize > len {
-                log::info!("out of range. try again");
+
+        let hostname = opts[0].to_owned();
+        let port = if let Some(port) = opts.get(1) {
+            if let Ok(v) = port.parse::<u16>() {
+                v
             } else {
-                break;
+                log::error!("Bad port provided.");
+                return ExitCode::FAILURE;
             }
-        }
-        addr_to_use = addresses[num as usize - 1].to_string();
-    } else {
-        addr_to_use = addresses[0].to_string();
-    }
-    let addr = format!("{}:{}", addr_to_use, port);
-    log::info!("attempting to ping {}...", addr);
-    match ping(&options, pvn, &port, &addr) {
-        Ok(_) => {
+        } else {
+            25565
+        };
+        (hostname, port)
+    };
 
-        }
+    let lookup = match resolution::resolve_minecraft_ips(name.clone()) {
+        Ok(v) => v,
         Err(e) => {
-            match e {
-                PingError::TimeoutError => {
-                    log::warn!("ping timed out.");
-                }
-                _ => {
+            log::error!("IP resolution failure.");
+            log::debug!("details: {:?}", e);
+            return ExitCode::FAILURE;
+        }
+    };
 
-                }
-            }
-        }
-    }
-    log::info!("attempting query to {}...", addr);
-    match query_ping(&options, &addr) {
-        Ok(_) => {
-
-        }
-        Err(_) => {
-        
-        }
-    }
-    Ok(())
-}
-fn query_ping(options: &Options, addr: &str) -> Result<()> {
-    use std::net::UdpSocket;
-    use rand::RngCore;
-    let mut socket = UdpSocket::bind("0.0.0.0:62034");
-    let mut set = false;
-    if socket.is_err() {
-        for i in (0..65535).rev() {
-            let x = UdpSocket::bind(format!("0.0.0.0:{}", i));
-            if x.is_ok() {
-                socket = x;
-                set = true;
-                break;
-            }
+    let addresses_to_ping = if lookup.len() > 1 {
+        log::info!("multiple addresses found. which should we use? (-1 for all)");
+        match selector::select_one_of(lookup.iter()).unwrap() {
+            Selected::Value(v) => vec![*v],
+            Selected::Special(_) => lookup.into_iter().collect(),
         }
     } else {
-        set = true;
-    }
-    if !set {
-        return Err(PingError::CantBind);
-    }
-    let socket = socket.unwrap();
+        vec![lookup.into_iter().next().unwrap()]
+    };
 
-    match socket.connect(addr) {
-        Ok(_) => {
 
-        }
-        Err(_) => {
-            log::info!("failed to connect. server probably doesn't support query/wrong port.");
-            return Err(PingError::ConnectError);
-        }
-    }
-    socket.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
-    let mut session_id = [0; 4];
-    rand::thread_rng().fill_bytes(&mut session_id);
-    let session_id = i32::from_be_bytes(session_id) & 0x0F0F0F0F;
-    let packet = query_netutil::PacketBuilder::new();
-    let packet = packet.build(09, session_id);
-    socket.send(&packet).or(Err(PingError::WriteError))?;
-    let mut vec = vec![0; 64];
-    let amt = socket.recv(&mut vec);
-    let amt = match amt {
-        Ok(a) => a,
-        Err(e) => {
-            match e.kind() {
-                std::io::ErrorKind::WouldBlock {} => {
-                    log::info!("no response after 5 seconds. server probably doesn't support query.");
-                    return Err(PingError::ReadError);
-                }
-                std::io::ErrorKind::TimedOut {} => {
-                    log::info!("no response after 5 seconds. server probably doesn't support query.");
-                    return Err(PingError::ReadError);
-                }
-                _ => {
-                    return Err(PingError::ReadError);
-                }
-            }
-            
-        }
-    };
-    let vec = vec.drain(..amt);
-    let mut vec = std::io::Cursor::new(vec);
-    let p_type = query_netutil::PacketUtils::read_byte(&mut vec).ok_or(PingError::ReadError)?;
-    if p_type != 0x09 {
-        return Err(PingError::WrongPacket);
-    }
-    let recv_s_id = query_netutil::PacketUtils::read_int32(&mut vec).ok_or(PingError::ReadError)?;
-    if recv_s_id != session_id {
-        return Err(PingError::WrongPacket);
-    }
-    let challenge_token = query_netutil::PacketUtils::read_string(&mut vec).ok_or(PingError::ReadError)?;
-    let challenge_token = i32::from_str_radix(&challenge_token, 10).or(Err(PingError::NumFromStrErr))?;
-    let mut packet = query_netutil::PacketBuilder::new();
-    packet.insert_int(challenge_token);
-    packet.insert_bytearray(vec![0; 4]);
-    let packet = packet.build(0x00, session_id);
-    socket.send(&packet).or(Err(PingError::WriteError))?;
-    let mut vec = vec![0; 2048];
-    let amt = socket.recv(&mut vec).or(Err(PingError::ReadError))?;
-    let vec = vec.drain(..amt);
-    let mut vec = std::io::Cursor::new(vec);
-    let p_type = query_netutil::PacketUtils::read_byte(&mut vec).ok_or(PingError::ReadError)?;
-    if p_type != 0x00 {
-        return Err(PingError::WrongPacket);
-    }
-    let recv_s_id = query_netutil::PacketUtils::read_int32(&mut vec).ok_or(PingError::ReadError)?;
-    if recv_s_id != session_id {
-        return Err(PingError::WrongPacket);
-    }
-    let mut x = [0; 11];
-    vec.read_exact(&mut x).or(Err(PingError::ReadError))?;
-    drop(x);
-    use std::collections::HashMap;
-    let mut hashmap: HashMap<String, String> = HashMap::new();
-    loop {
-        let key = query_netutil::PacketUtils::read_string(&mut vec).ok_or(PingError::ReadError)?;
-        if key.len() == 0 {
-            break;
-        }
-        let value = query_netutil::PacketUtils::read_string(&mut vec).ok_or(PingError::ReadError)?;
-        hashmap.insert(key, value);
-    }
-    log::info!("query results:");
-    for (k, v) in hashmap {
-        println!("- {}: {}", k, v);
-    }
-    let mut x = [0; 10];
-    vec.read_exact(&mut x).or(Err(PingError::ReadError))?;
-    drop(x);
-    let mut players = vec![];
-    loop {
-        let player = query_netutil::PacketUtils::read_string(&mut vec).ok_or(PingError::ReadError)?;
-        if player.len() < 1 {
-            break;
-        }
-        players.push(player);
-    }
-    if players.len() > 0 {
-        log::info!("online players:");
-        for player in players {
-            println!("- {}", player);
-        }
-    }
-    Ok(())
-}
-fn ping(options: &Options, pvn: i32, port: &str, addr: &str) -> Result<u128> {
-    let mut builder = PacketBuilder::new();
-    builder.insert_varint(pvn);
-    builder.insert_string(&options.addr);
-    builder.insert_unsigned_short(u16::from_str_radix(&port, 10).or_else(|_| Err(PingError::ParseIntError))?);
-    builder.insert_varint(1);
-    let packet = builder.build(0x00);
-    let mut stream = TcpStream::connect_timeout(&addr.parse().unwrap(), std::time::Duration::from_secs(5)).or_else(|_| Err(PingError::TimeoutError))?;
-    stream.set_write_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
-    stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
-    stream
-        .write(&packet)
-        .or_else(|_| Err(PingError::WriteError))?;
-    let builder = PacketBuilder::new();
-    let packet = builder.build(0x00);
-    stream
-        .write(&packet)
-        .or_else(|_| Err(PingError::WriteError))?;
-    let response = PacketUtils::read_packet(&mut stream);
-    let response = match response {
-        Ok(x) => x,
-        Err(_) => {
-            log::error!("incorrect response from server. attempting legacy ping...");
-            match legacy_ping(&addr) {
-                Ok(_) => {
-                    return Ok(0);
-                }
-                Err(_) => {
-                    return Err(PingError::GenericPingError);
-                }
-            }
-        }
-    };
-    let mut builder = PacketBuilder::new();
-    builder.insert_long(420);
-    let packet = builder.build(0x01);
-    if response.id != 0x00 {
-        return Err(PingError::GenericPingError);
-    }
-    let mut packetdata = std::io::Cursor::new(response.contents);
-    let json = read_string(&mut packetdata)?;
-    stream
-        .write(&packet)
-        .or_else(|_| Err(PingError::ConnectError))?;
-    if options.verbose {
-        log::info!("[V] entire response: \n{}", json);
-    }
-    let deserialized: serde_json::Value = match serde_json::from_str::<serde_json::Value>(&json) {
-        Ok(x) => x,
-        Err(_) => {
-            return Err(PingError::GenericPingError);
-        }
-    };
-    if !options.only_ping {
-        match deserialized["description"]
-        .to_string()
-        .to_colored_json_auto()
-    {
-        Ok(x) => {
-            log::info!("server description:\n{}", x);
-        }
-        Err(e) => {
-            if options.verbose {
-                log::warn!("json pretty-ification failed. error: {:?}", e);
-            }
-            log::info!("server description:\n{:?}", deserialized["description"]);
-        }
-    }
-    if !deserialized["modinfo"].is_null() {
-        loop {
-            let modinfo: ModInfo = match serde_json::from_str(&deserialized["modinfo"].to_string()) {
-                Ok(m) => m,
-                Err(_) => {
-                    break;
-                }
+    let len = addresses_to_ping.len();
+    for (idx, address_to_ping) in addresses_to_ping.into_iter().enumerate() {
+        log::info!("attempting to ping {}...", address_to_ping);
+
+        let res = (|| {
+            let l = ModernPinger {
+                protocol_version: -1,
+                hostname: name.0.clone(),
+                read_timeout: Duration::from_secs(5),
             };
-            if modinfo.r#type == "FML" && options.modlist || options.verbose {
-                log::info!("FML mod info:");
-                for i in 0..modinfo.modList.len() {
-                    log::info!("mod #{}", i + 1);
-                    println!("   --- id: {}", modinfo.modList[i].modid);   
-                    println!("   --- version: {}", modinfo.modList[i].version);   
-                }
-            } else if modinfo.r#type == "FML" {
-                let len = modinfo.modList.len();
-                match len {
-                    1 => {
-                        log::info!("server is an FML compatible server with {} mod.", len);
+            let data = l.ping(address_to_ping);
+    
+            match data {
+                Ok(data) => {
+                    log::info!("server description:\n{}", data.response.description);
+    
+                    if let Some(mods) = data.response.mods {
+                        log::info!(
+                            "server uses the {:?} mod software and has {} installed mods.",
+                            mods.ty,
+                            mods.mod_list.len()
+                        );
+                        log::debug!("mods: {:?}", mods.mod_list);
                     }
-                    _ => {
-                        log::info!("server is an FML compatible server with {} mods.", len);
+    
+                    log::info!(
+                        "server version:\n   --- {:?}\n   --- protocol version {}",
+                        data.response.version.name,
+                        data.response.version.protocol
+                    );
+    
+                    if let Some(players) = data.response.players {
+                        log::info!("players:\n   --- {}/{}", players.online, players.max);
+    
+                        if !players.sample.is_empty() {
+                            log::info!("sample:");
+                            for v in players.sample {
+                                print!("   --- {}", v.name);
+                                if options.verbose {
+                                    print!(" (uuid {})", v.id);
+                                }
+                                println!();
+                            }
+                        }
+                    } else {
+                        log::info!("server is not announcing player count.");
+                    }
+    
+                    log::info!("[{}] ping: {}ms", address_to_ping, data.latency.as_millis());
+                }
+                Err(e) => {
+                    log::info!("standard ping failed. attempting legacy ping...");
+                    log::debug!("failure reason: {:?}", e);
+                    let l = LegacyPinger {
+                        protocol_version: 0,
+                        hostname: name.0.clone(),
+                    };
+    
+                    let data = match l.ping(address_to_ping) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            log::error!("legacy ping failed. {:?}", e);
+                            return ExitCode::FAILURE;
+                        }
+                    };
+    
+                    log::info!("motd:");
+                    println!("   --- {}", get_or(data.motd, "none"));
+                    log::info!("players:");
+                    println!(
+                        "   --- {}/{}",
+                        get_or(data.online_players, "none"),
+                        get_or(data.max_players, "none")
+                    );
+    
+                    if let Some(extra) = data.extra {
+                        log::info!("protocol version:");
+                        println!("   --- {}", get_or(extra.protocol_version, "none"));
+                        log::info!("server version:");
+                        println!("   --- {}", get_or(extra.server_version, "none"));
+                    }
+    
+                    if !data.unrecognised.is_empty() {
+                        log::debug!(
+                            "unrecognised fields in ping response: {:?}",
+                            data.unrecognised
+                        );
                     }
                 }
             }
-            break;
+            ExitCode::SUCCESS
+        })();
+
+        if idx == len {
+            return res;
         }
     }
-    //log::info!("poo: {}", deserialized["ashh1"].is_null());
-    log::info!(
-        "server version:\n   --- {}\n   --- protocol version {}",
-        deserialized["version"]["name"],
-        deserialized["version"]["protocol"]
-    );
-    if !deserialized["players"].is_null() {
-        log::info!(
-            "players:\n   --- {}/{}",
-            deserialized["players"]["online"],
-            deserialized["players"]["max"]
-        );
-    } else {
-        log::info!(
-            "server is not announcing player count."
-        );
-    }
-    if !deserialized["players"]["sample"].is_null() {
-        loop {
-            let sample: Players = match serde_json::from_str(&deserialized["players"].to_string()) {
-                Ok(m) => m,
-                Err(_) => {
-                    break;
-                }
-            };
-            log::info!("sample:");
-            for player in sample.sample {
-                println!("   --- {}", player.name);
-            }
-            break;
-        }
-    }
-    }
-    use viuer::*;
-    if !deserialized["favicon"].is_null() {
-        let favicon = deserialized["favicon"].to_string();
-        let mut favicon = rem_first_and_last(&favicon).to_string();
-        if favicon.starts_with("data:image/png;base64,") {
-            favicon.drain(.."data:image/png;base64,".len());
-            let favicon = base64::decode(favicon);
-            if favicon.is_ok() {
-                let favicon = favicon.unwrap();
-                let conf = Config {
-                    width: Some(32),
-                    height: Some(16),
-                    x: 0,
-                    y: 64,
-                    ..Default::default()
-                };
-                let img = image::load_from_memory(&favicon).or_else(|_| Err(PingError::FaviconError))?;
-                log::info!("favicon:\n\n\n");
-                print(&img, &conf).or_else(|_| Err(PingError::ReadError))?;
-                println!("\n\n\n");
-            }
-        }
-    }
-    //log::info!("{}", deserialized["favicon"].to_string());
-    let now = Instant::now();
-    let response = PacketUtils::read_packet(&mut stream).or_else(|_| Err(PingError::ReadError))?;
-    if response.id != 0x01 {
-        return Err(PingError::GenericPingError);
-    }
-    let mut cursor = std::io::Cursor::new(response.contents);
-    let mut bytes = [0; 8];
-    cursor
-        .read_exact(&mut bytes)
-        .or_else(|_| Err(PingError::ReadError))?;
-    let long = i64::from_be_bytes(bytes);
-    if long != 420 {
-        return Err(PingError::GenericPingError);
-    }
-    let elapsed = now.elapsed();
-    log::info!("[{addr}] ping: {}ms", elapsed.as_millis(), addr = addr);
-    Ok(elapsed.as_millis())
+
+    ExitCode::SUCCESS
 }
-fn init_logger() {
+
+fn get_or(v: Option<String>, val: &str) -> Cow<str> {
+    if let Some(v) = v {
+        Cow::Owned(v)
+    } else {
+        Cow::Borrowed(val)
+    }
+}
+
+fn init_logger(verbose: bool) {
+    use std::io::Write;
     Builder::new()
         .format(move |buf, record| writeln!(buf, "mcping - {}", record.args()))
-        .filter(None, LevelFilter::Info)
+        .filter(
+            None,
+            if !verbose {
+                LevelFilter::Info
+            } else {
+                LevelFilter::Debug
+            },
+        )
         .init();
-}
-
-fn get_line() -> std::io::Result<String> {
-    let mut line = String::new();
-    std::io::stdin().read_line(&mut line)?;
-    return Ok(line.trim().to_string());
-}
-
-fn read_string(reader: &mut dyn std::io::Read) -> Result<String> {
-    let array = PacketUtils::read_varint_prefixed_bytearray(reader)
-        .or_else(|_| Err(PingError::ReadError))?;
-    Ok(String::from_utf8_lossy(&array).to_string())
-}
-
-
-fn srv_lookup(domain: &str) -> Option<(String, u16)> {
-    let resolver = Resolver::new(ResolverConfig::cloudflare_tls(), ResolverOpts::default()).unwrap();
-    let srv = resolver.srv_lookup(format!("_minecraft._tcp.{}", domain.to_string()));
-    let srv = match srv {
-        Ok(r) => r,
-        Err(_) => {
-            return None;
-        }
-    };
-    let address = match srv.as_lookup().iter().next() {
-        Some(x) => x,
-        None => {
-            return None;
-        }
-    };
-    let address = match address.as_srv() {
-        Some(x) => x,
-        None => {
-            return None;
-        }
-    };
-    let port = address.port();
-    let target = address.target();
-    return Some((target.to_string(), port));
-}
-
-fn legacy_ping(addr: &str) -> Result<()> {
-    let mut stream = TcpStream::connect(addr).or_else(|_| Err(PingError::ConnectError))?;
-    stream.write(&[0xFE, 0x01, 0xFA]).or_else(|_| Err(PingError::WriteError))?;
-    let mut buf = vec![];
-    stream.read_to_end(&mut buf).unwrap();
-    let buf = &buf[3..];
-    let mut newbuf = vec![];
-    let mut flag = true;
-    for i in 0..buf.len() {
-        if flag == false {
-            newbuf.push(buf[i]);
-        }
-        flag ^= true;
-    }
-    let mut string = vec![];
-    for i in 0..6 {
-        string.push(buf[i]);
-    }
-    let mut values = vec![];
-    let mut chars: Vec<char> = String::from_utf8_lossy(&newbuf).to_string().chars().collect();
-    if string == [0, 167, 0, 49, 0, 0] {
-        chars.remove(0);
-        chars.remove(0);
-        chars.remove(0);
-        loop {
-            let mut string = String::new();
-            loop {
-                let character = chars.remove(0);
-                if character as u8 != 0x00 {
-                    string.push(character);
-                } else {
-                    values.push(string);
-                    break;
-                }
-                if chars.len() == 0 {
-                    values.push(string);
-                    break;
-                }
-            }
-            if chars.len() == 0 {
-                break;
-            }        
-        }
-        log::info!("server description:\n{}", values[2]);
-        log::info!(
-            "server version:\n   --- {}\n   --- protocol version {}",
-            values[1],
-            values[0]
-        );
-        log::info!(
-            "players:\n   --- {}/{}",
-            values[3],
-            values[4]
-        );
-    } else {
-        loop {
-            let mut string = String::new();
-            loop {
-                let character = chars.remove(0);
-                if character as u8 != 253 {
-                    string.push(character);
-                } else {
-                    values.push(string);
-                    break;
-                }
-                if chars.len() == 0 {
-                    values.push(string);
-                    break;
-                }
-            }
-            if chars.len() == 0 {
-                break;
-            }        
-        }
-        log::info!("server description:\n{}", values[0]);
-        log::info!("server version cannot be determined in this version of the protocol. probably older than release 1.4");
-        log::info!(
-            "players:\n   --- {}/{}",
-            values[1],
-            values[2]
-        );
-    }
-    Ok(())
-}
-fn rem_first_and_last(value: &str) -> &str {
-    let mut chars = value.chars();
-    chars.next();
-    chars.next_back();
-    chars.as_str()
 }
