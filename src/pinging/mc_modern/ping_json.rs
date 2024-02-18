@@ -37,11 +37,11 @@ pub struct PingModInfo {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct PingResponse {
     pub version: PingVersion,
-    pub players: PingPlayerInfo,
+    pub players: Option<PingPlayerInfo>,
     pub description: serde_json::Value,
     pub favicon: String,
     pub enforces_secure_chat: Option<bool>,
     pub previews_chat: Option<bool>,
     #[serde(rename = "modinfo")]
-    pub mods: PingModInfo
+    pub mods: Option<PingModInfo>
 }
