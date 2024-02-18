@@ -143,11 +143,10 @@ fn main() -> ExitCode {
                     );
     
                     if let Some(extra) = data.extra {
-                        log::info!("extra data present (>1.6)");
                         log::info!("protocol version:");
                         println!("   --- {}", get_or(extra.protocol_version, "none"));
                         log::info!("server version:");
-                        println!("---   {}", get_or(extra.server_version, "none"));
+                        println!("   --- {}", get_or(extra.server_version, "none"));
                     }
     
                     if !data.unrecognised.is_empty() {
