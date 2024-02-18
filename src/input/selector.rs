@@ -13,7 +13,7 @@ pub fn select_one_of<T: Display>(values: impl Iterator<Item = T>) -> std::io::Re
     let mut values_vec = vec![];
 
     for (index, value) in values.enumerate() {
-        println!("* #{index} {value}");
+        log::info!("* #{index} {value}");
         values_vec.push(value);
     }
 
@@ -28,7 +28,7 @@ pub fn select_one_of<T: Display>(values: impl Iterator<Item = T>) -> std::io::Re
             Ok(v) if (v as usize) < values_vec.len() => break (v as usize),
             // any other (invalid) selection
             _ => {
-                println!("Invalid selection: {:?}", s);
+                log::error!("Invalid selection: {:?}", s);
                 s.clear();
                 continue;
             }

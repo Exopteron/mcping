@@ -18,7 +18,8 @@ pub struct ModernPingData {
 
 pub struct ModernPinger {
     pub protocol_version: i32,
-    pub hostname: String
+    pub hostname: String,
+    pub read_timeout: Duration
 }
 
 impl Pinger for ModernPinger {
@@ -29,6 +30,7 @@ impl Pinger for ModernPinger {
     fn ping(&self, addr: std::net::SocketAddr) -> std::result::Result<Self::Data, Self::Error> {
         
         let mut stream = TcpStream::connect(addr)?;
+        stream.set_read_timeout(Some(self.read_timeout));
 
         {
             let mut handshake_packet = vec![];

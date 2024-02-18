@@ -11,3 +11,7 @@ byteorder = "1.5"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rand = "0.8.5"
+hickory-resolver = "0.24.0"
+log = "0.4"
+env_logger = "0.11"
+clap = { version = "<4.4.7", features = ["derive"] }
