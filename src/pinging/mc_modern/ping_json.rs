@@ -39,7 +39,7 @@ pub struct PingResponse {
     pub version: PingVersion,
     pub players: Option<PingPlayerInfo>,
     pub description: serde_json::Value,
-    pub favicon: String,
+    pub favicon: Option<String>,
     pub enforces_secure_chat: Option<bool>,
     pub previews_chat: Option<bool>,
     #[serde(rename = "modinfo")]
