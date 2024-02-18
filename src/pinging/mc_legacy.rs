@@ -77,7 +77,7 @@ impl Pinger for LegacyPinger {
 
         let read_data = String::from_utf16(&utf16_str)?;
 
-        let get_field = |v: &mut Split<char>, name: &'static str| {
+        let get_field = |v: &mut Split<char>| {
             v.next()
                 .map(|v| v.to_owned())
         };
@@ -87,21 +87,22 @@ impl Pinger for LegacyPinger {
 
             let mut fields = read_data.trim_start_matches("§1\0").split('\0'); // fields are delimited by NUL-chars
 
-            let protocol_version = get_field(&mut fields, "Protocol Version");
+            let protocol_version = get_field(&mut fields);
 
-            let server_version = get_field(&mut fields, "Minecraft Server Version");
+            let server_version = get_field(&mut fields);
 
 
+            #[allow(clippy::unnecessary_unwrap)]
             if protocol_version.is_some() && server_version.is_none() {
                 // only one field was delivered. something weird happened!
                 return Err(LegacyPingError::UnexpectedReply(protocol_version.unwrap()))
             }
 
-            let motd = get_field(&mut fields, "MOTD");
+            let motd = get_field(&mut fields);
 
-            let online_players = get_field(&mut fields, "Online Players");
+            let online_players = get_field(&mut fields);
 
-            let max_players = get_field(&mut fields, "Max Players");
+            let max_players = get_field(&mut fields);
 
             let unrecognised = fields.map(|v| v.to_owned()).collect::<Vec<_>>();
 
@@ -121,16 +122,17 @@ impl Pinger for LegacyPinger {
             let mut fields = read_data.split('§'); // fields are delimited by the section symbol
 
 
-            let motd = get_field(&mut fields, "MOTD");
+            let motd = get_field(&mut fields);
 
-            let online_players = get_field(&mut fields, "Online Players");
+            let online_players = get_field(&mut fields);
 
+            #[allow(clippy::unnecessary_unwrap)]
             if motd.is_some() && online_players.is_none() {
                 // only one field was delivered. something weird happened!
                 return Err(LegacyPingError::UnexpectedReply(motd.unwrap()))
             }
 
-            let max_players = get_field(&mut fields, "Max Players");
+            let max_players = get_field(&mut fields);
 
             let unrecognised = fields.map(|v| v.to_owned()).collect::<Vec<_>>();
 
