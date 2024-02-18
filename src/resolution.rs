@@ -10,6 +10,8 @@ pub fn resolve_minecraft_ips(provided_address: (String, u16)) -> io::Result<Hash
 
 
     if let Ok(srv) = resolver.srv_lookup(format!("_minecraft._tcp.{}", provided_address.0))  {
+        
+        log::debug!("got an SRV record: {:?}", srv);
         for v in srv {
             let target = resolver.lookup_ip(v.target().clone())?;
 
