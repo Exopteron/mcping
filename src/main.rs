@@ -54,7 +54,14 @@ fn main() -> ExitCode {
         (hostname, port)
     };
 
-    let lookup = resolution::resolve_minecraft_ips(name.clone()).unwrap();
+    let lookup = match resolution::resolve_minecraft_ips(name.clone()) {
+        Ok(v) => v,
+        Err(e) => {
+            log::error!("IP resolution failure.");
+            log::debug!("details: {:?}", e);
+            return ExitCode::FAILURE;
+        }
+    };
 
     let addresses_to_ping = if lookup.len() > 1 {
         log::info!("multiple addresses found. which should we use? (-1 for all)");
