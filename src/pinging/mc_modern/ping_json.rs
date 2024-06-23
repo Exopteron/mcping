@@ -18,6 +18,7 @@ pub struct PingPlayer {
 pub struct PingPlayerInfo {
     pub max: u32,
     pub online: u32,
+    #[serde(default)]
     pub sample: Vec<PingPlayer>
 }
 #[derive(Serialize, Deserialize, Debug)]
